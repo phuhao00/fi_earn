@@ -89,11 +89,17 @@ class DataCache:
             logger.warning(f"写入缓存失败: {e}")
 
     def invalidate(self, key: str) -> None:
+        with self._lock:
+            self._mem.pop(key, None)
         path = self._key_to_path(key)
         meta_path = self._key_to_path(key, ".meta.json")
         for p in [path, meta_path]:
             if p.exists():
                 p.unlink()
+
+    # 兼容别名
+    def delete(self, key: str) -> None:
+        self.invalidate(key)
 
     def clear_all(self) -> None:
         for f in self.cache_dir.glob("*"):

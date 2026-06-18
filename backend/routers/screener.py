@@ -4,9 +4,18 @@ from datetime import datetime
 from fastapi import APIRouter, Query
 from fastapi.concurrency import run_in_threadpool
 
-from core.screener.selector import get_selector
+from core.data.cache import cache
+from core.screener.selector import get_selector, CACHE_KEY
 
 router = APIRouter()
+
+
+@router.post("/clear-cache")
+async def clear_screener_cache():
+    """清除选股缓存，下次请求将强制重算。"""
+    for key in [CACHE_KEY, "spot_data_hist_fallback", "spot_data_raw"]:
+        cache.delete(key)
+    return {"ok": True, "message": "选股缓存已清除，请刷新页面或点击重新筛选"}
 
 
 @router.get("/top10")
