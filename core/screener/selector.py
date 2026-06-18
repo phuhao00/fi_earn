@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from core.data.cache import cache
+from core.data.cache import cache, SINA_HIST_LOCK
 from core.data.market import get_market_data
 
 # --------------------------------------------------------------------------- #
@@ -29,10 +29,12 @@ CACHE_TTL_HOURS = 0.5          # 30 分钟新鲜缓存
 CANDIDATES_N = 30              # 进入技术精排的候选数
 FINAL_N = 10                   # 最终输出数量
 HISTORY_DAYS = 65              # 拉取历史天数（确保 MA60 有数据）
-MAX_WORKERS = 16               # 并发拉取线程数（基本操作）
-HIST_WORKERS = 32              # 历史兜底模式并发数
-HIST_SAMPLE = 500              # 历史兜底模式从全A股均匀采样支数
-HIST_TIMEOUT = 8               # 单支历史拉取超时秒数
+MAX_WORKERS = 8                # 并发拉取线程数（基本操作）
+HIST_WORKERS = 4               # 历史兜底模式并发数（受 mini_racer 锁限制，无需过多）
+HIST_SAMPLE = 120              # 历史兜底模式从全A股均匀采样支数（锁序列化后保持合理耗时）
+HIST_TIMEOUT = 15              # 单支历史拉取超时秒数（mini_racer 解密耗时较长）
+
+# SINA_HIST_LOCK 从 cache 模块统一导入（跨模块共享同一把锁）
 
 # 保底宇宙：精选 150 支沪深蓝筹（历史 CDN 必有数据，收盘后也能用）
 CORE_UNIVERSE = [
@@ -325,10 +327,12 @@ class StockSelector:
 
         def _one(code: str):
             try:
-                hist = ak.stock_zh_a_daily(
-                    symbol=_sina_sym(code),
-                    adjust="qfq",
-                )
+                # V8/mini_racer 不是线程安全的，序列化所有 stock_zh_a_daily 调用
+                with SINA_HIST_LOCK:
+                    hist = ak.stock_zh_a_daily(
+                        symbol=_sina_sym(code),
+                        adjust="qfq",
+                    )
                 if hist is None or hist.empty or len(hist) < 5:
                     return None
                 # stock_zh_a_daily 列名已是英文: date,open,high,low,close,volume,amount,...

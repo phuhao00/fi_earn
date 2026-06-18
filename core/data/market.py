@@ -14,7 +14,7 @@ from typing import Optional
 import pandas as pd
 from loguru import logger
 
-from .cache import cache
+from .cache import cache, SINA_HIST_LOCK
 
 # 主要指数代码映射（AkShare 格式）
 INDEX_MAP = {
@@ -182,11 +182,13 @@ class MarketData:
             logger.warning(f"东方财富接口失败，降级新浪: {symbol} {e}")
 
         # 备用接口：新浪财经（不依赖 push2 CDN，不支持日期参数，拉全量后裁切）
+        # stock_zh_a_daily 用 mini_racer(V8) 解密，非线程安全，必须加锁
         try:
-            df = self._ak.stock_zh_a_daily(
-                symbol=sina_code,
-                adjust=adjust if adjust in ("qfq", "hfq") else "",
-            )
+            with SINA_HIST_LOCK:
+                df = self._ak.stock_zh_a_daily(
+                    symbol=sina_code,
+                    adjust=adjust if adjust in ("qfq", "hfq") else "",
+                )
             df["date"] = pd.to_datetime(df["date"])
             df = df.set_index("date").sort_index()
             # 按日期范围裁切

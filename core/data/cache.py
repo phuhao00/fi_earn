@@ -11,6 +11,11 @@ from typing import Any, Optional
 import pandas as pd
 from loguru import logger
 
+# ── 全局共享锁（跨模块）────────────────────────────────────────────────────────
+# PyMiniRacer(V8) 非线程安全：stock_zh_a_daily 内部用 mini_racer 解密新浪数据，
+# 多线程并发调用会 segfault。所有调用点必须持有此锁。
+SINA_HIST_LOCK = threading.Lock()
+
 
 class DataCache:
     """双层缓存：内存（热数据）+ 磁盘（持久化）。"""
