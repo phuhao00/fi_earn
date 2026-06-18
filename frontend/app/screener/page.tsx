@@ -179,7 +179,7 @@ function StockCard({ stock }: { stock: ScreenerStock }) {
         <span className="flex items-center gap-1.5">
           <span>📰</span>
           <span>近期新闻</span>
-          {stock.news.length > 0 && (
+          {(stock.news?.length ?? 0) > 0 && (
             <span className="bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded-full text-[10px]">
               {stock.news.length}
             </span>
@@ -189,7 +189,7 @@ function StockCard({ stock }: { stock: ScreenerStock }) {
       </button>
       {expanded && (
         <div className="mt-2 pt-2 border-t border-[#2d3140]">
-          <NewsList headlines={stock.news} />
+          <NewsList headlines={stock.news ?? []} />
         </div>
       )}
     </div>
