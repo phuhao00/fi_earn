@@ -161,3 +161,44 @@ export const factorApi = {
         (endDate ? `&end_date=${endDate}` : "")
     ),
 };
+
+// ─── 智能选股 ─────────────────────────────────────────────
+export interface StockScores {
+  trend: number;
+  safety: number;
+  fundamental: number;
+  hotness: number;
+}
+
+export interface StockMetrics {
+  pe: number;
+  pb: number;
+  float_cap_yi: number;
+  rsi14: number;
+  ma_aligned: boolean;
+  gain_60d: number;
+  amount_yi: number;
+}
+
+export interface ScreenerStock {
+  rank: number;
+  code: string;
+  name: string;
+  price: number;
+  change_pct: number;
+  total_score: number;
+  scores: StockScores;
+  metrics: StockMetrics;
+  reason: string;
+}
+
+export interface ScreenerResult {
+  updated_at: string;
+  total: number;
+  stocks: ScreenerStock[];
+}
+
+export const screenerApi = {
+  top10: (force = false) =>
+    request<ScreenerResult>(`/api/screener/top10${force ? "?force=true" : ""}`),
+};

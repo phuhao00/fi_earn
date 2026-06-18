@@ -129,14 +129,14 @@ from fastapi.middleware.cors import CORSMiddleware
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from backend.routers import market, backtest, factor
+from backend.routers import market, backtest, factor, screener
 
 
 async def _warm_cache() -> None:
     """服务启动后在后台异步预热常用数据，用户首次访问直接命中缓存。"""
-    import logging
     from datetime import datetime, timedelta
     from core.data.market import get_market_data
+    from core.screener.selector import get_selector
 
     loop = asyncio.get_event_loop()
     md = get_market_data()
@@ -148,6 +148,7 @@ async def _warm_cache() -> None:
         ("涨跌幅榜", lambda: md.get_market_movers(10)),
         ("沪深300历史", lambda: md.get_index_history("sh000300", start, end)),
         ("创业板指历史", lambda: md.get_index_history("sz399006", start, end)),
+        ("智能选股", lambda: get_selector().select()),
     ]
     for name, fn in tasks:
         try:
@@ -182,6 +183,7 @@ app.add_middleware(
 app.include_router(market.router, prefix="/api/market", tags=["市场数据"])
 app.include_router(backtest.router, prefix="/api/backtest", tags=["策略回测"])
 app.include_router(factor.router, prefix="/api/factor", tags=["因子研究"])
+app.include_router(screener.router, prefix="/api/screener", tags=["智能选股"])
 
 
 @app.get("/")

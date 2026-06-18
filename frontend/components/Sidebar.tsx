@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 
 const NAV = [
   { href: "/", label: "市场总览", icon: "📈" },
+  { href: "/screener", label: "智能选股", icon: "🎯" },
   { href: "/market", label: "行情查询", icon: "🔍" },
   { href: "/technical", label: "技术分析", icon: "📊" },
   { href: "/backtest", label: "策略回测", icon: "🚀" },
