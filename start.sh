@@ -21,11 +21,25 @@ error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 # ── 依赖检查 ──────────────────────────────────────────────
 check_python() {
-  if ! command -v python3 &>/dev/null; then
-    error "未找到 python3，请先安装 Python 3.11+"
-  fi
-  PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-  info "Python 版本: $PYTHON_VER"
+  # 优先使用能正常导入项目依赖的 Python
+  for candidate in python3.11 python3.12 python3.13 python3; do
+    PY_BIN=$(command -v "$candidate" 2>/dev/null || true)
+    if [ -n "$PY_BIN" ] && "$PY_BIN" -c "import akshare, fastapi" &>/dev/null 2>&1; then
+      PYTHON="$PY_BIN"
+      PYTHON_VER=$("$PYTHON" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+      info "Python 版本: $PYTHON_VER ($PYTHON)"
+      return 0
+    fi
+  done
+  # 回退：找到任意 python3.11
+  for extra in ~/.local/bin/python3.11 /opt/homebrew/bin/python3.11; do
+    if [ -x "$extra" ]; then
+      PYTHON="$extra"
+      info "使用备选 Python: $PYTHON"
+      return 0
+    fi
+  done
+  error "未找到合适的 Python（需要 3.11+），请先运行: pip install -r requirements.txt"
 }
 
 check_node() {
@@ -83,7 +97,7 @@ stop_existing() {
 start_backend() {
   info "启动 FastAPI 后端（端口 $BACKEND_PORT）..."
   cd "$ROOT"
-  nohup python3 -m uvicorn backend.main:app \
+  nohup "$PYTHON" -m uvicorn backend.main:app \
     --host 0.0.0.0 \
     --port "$BACKEND_PORT" \
     --reload \

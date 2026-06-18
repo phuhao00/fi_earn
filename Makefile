@@ -26,7 +26,10 @@ start:
 backend:
 	@mkdir -p $(LOG_DIR)
 	@echo "[INFO] 启动 FastAPI 后端..."
-	uvicorn backend.main:app --host 0.0.0.0 --port $(BACKEND_PORT) --reload
+	@PYTHON=$$(for p in python3.11 python3.12 python3.13 python3; do \
+	    which $$p 2>/dev/null && break; \
+	  done); \
+	  $$PYTHON -m uvicorn backend.main:app --host 0.0.0.0 --port $(BACKEND_PORT) --reload
 
 frontend:
 	@echo "[INFO] 启动 Next.js 前端..."
