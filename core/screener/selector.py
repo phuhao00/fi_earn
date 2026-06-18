@@ -197,36 +197,132 @@ class StockSelector:
     # ------------------------------------------------------------------ #
 
     def _fetch_spot(self, md) -> pd.DataFrame:
-        """获取全市场快照。
-        优先新鲜数据（10min TTL）；收盘后实时接口会断连，自动降级到 48 小时内的旧缓存——
-        PE/PB/流通市值等基本面指标日内不变，用昨天数据选股完全可行。
+        """获取全市场快照，四级降级策略。
+        东方财富实时 CDN 收盘后（约 15:00）会断连；历史数据 CDN 全天可用。
         """
-        # 1. 尝试新鲜缓存（复用 market 共享方法）
+        # 1. 新鲜缓存（10min TTL）
         try:
             df = md.get_spot_data()
             if df is not None and not df.empty:
                 return df
         except Exception as e:
-            logger.warning(f"md.get_spot_data() 失败: {e}")
+            logger.warning(f"get_spot_data 失败: {e}")
 
-        # 2. 降级直接拉（以防 market 模块也失败）
+        # 2. 直接拉实时快照
         try:
             df = md._ak.stock_zh_a_spot_em()
             if df is not None and not df.empty:
-                logger.info("直接拉取全市场快照成功")
-                cache.set("spot_data_raw", df)   # 写入共享缓存供下次用
+                cache.set("spot_data_raw", df)
+                logger.info(f"直接拉取全市场快照成功: {len(df)} 支")
                 return df
         except Exception as e:
-            logger.warning(f"直接拉取失败: {e}")
+            logger.warning(f"stock_zh_a_spot_em 失败: {e}")
 
-        # 3. 收盘后兜底：使用 48h 内的旧快照（基本面数据日内不变）
+        # 3. 48h 旧缓存（今天成功拉过的数据）
         stale = cache.get("spot_data_raw", ttl_hours=48, allow_stale=True)
         if stale is not None and not stale.empty:
-            logger.info(f"实时接口不可用，使用 48h 内缓存快照（{len(stale)} 支）进行选股")
+            logger.info(f"使用 48h 内实时缓存快照: {len(stale)} 支")
             return stale
 
-        logger.error("全市场快照完全不可用（无任何缓存且实时接口失败）")
+        # 4. 收盘兜底：历史数据 CDN 构建快照（与实时 CDN 完全不同，收盘后仍可用）
+        hist_stale = cache.get("spot_data_hist_fallback", ttl_hours=4, allow_stale=True)
+        if hist_stale is not None and not hist_stale.empty:
+            logger.info(f"使用历史兜底缓存: {len(hist_stale)} 支")
+            return hist_stale
+
+        logger.info("实时 CDN 不可用，切换到历史日线数据模式（CSI 300+500 成分股）...")
+        fallback_df = self._fetch_spot_from_hist(md)
+        if not fallback_df.empty:
+            cache.set("spot_data_hist_fallback", fallback_df)
+            logger.info(f"历史模式快照构建完成: {len(fallback_df)} 支")
+            return fallback_df
+
+        logger.error("所有数据源均失败")
         return pd.DataFrame()
+
+    def _fetch_spot_from_hist(self, md) -> pd.DataFrame:
+        """
+        用历史日线数据（stock_zh_a_hist）构建类似 spot 的快照。
+        历史 CDN（push2his.eastmoney.com）与实时 CDN 不同，收盘后照常可用。
+        使用 CSI 300 + CSI 500 成分股作为宇宙（~800 支质量股票）。
+        """
+        ak = md._ak
+
+        # 1. 获取指数成分股代码
+        codes: set[str] = set()
+        for sym in ["000300", "000905"]:
+            try:
+                df_comp = ak.index_stock_cons_weight_csindex(symbol=sym)
+                col = next((c for c in df_comp.columns if "代码" in c), None)
+                if col and not df_comp.empty:
+                    new = df_comp[col].astype(str).str.zfill(6).tolist()
+                    codes.update(new)
+                    logger.debug(f"成分股 {sym}: {len(new)} 支")
+            except Exception as e:
+                logger.warning(f"获取 {sym} 成分股失败: {e}")
+
+        # 若成分股获取失败，退化到 stock_info 列表前 500
+        if not codes:
+            try:
+                sl = md.get_stock_list()
+                if not sl.empty:
+                    raw = sl["code"].astype(str).str.zfill(6).tolist()
+                    # 只取沪深主板（不含科创 688/创业板 300+）以减少噪音
+                    codes = set(c for c in raw if c.startswith(("000", "001", "002", "003", "600", "601", "603", "605")))
+                    codes = set(list(codes)[:600])
+                    logger.info(f"退化到股票列表前 600 支")
+            except Exception as e:
+                logger.error(f"获取股票列表也失败: {e}")
+                return pd.DataFrame()
+
+        logger.info(f"历史模式宇宙: {len(codes)} 支，开始并发拉取 65 日历史...")
+
+        # 2. 获取股票名称映射
+        name_map: dict[str, str] = {}
+        try:
+            sl = md.get_stock_list()
+            if not sl.empty:
+                name_map = dict(zip(sl["code"].astype(str).str.zfill(6), sl["name"]))
+        except Exception:
+            pass
+
+        # 3. 并发拉取历史
+        end_date = datetime.today().strftime("%Y-%m-%d")
+        start_date = (datetime.today() - timedelta(days=75)).strftime("%Y-%m-%d")
+        rows = []
+
+        def _one(code: str):
+            try:
+                hist = md.get_history(code, start_date, end_date, "qfq")
+                if hist.empty or "close" not in hist.columns or len(hist) < 5:
+                    return None
+                close = hist["close"]
+                latest_close = float(close.iloc[-1])
+                prev_close = float(close.iloc[-2])
+                change_pct = (latest_close - prev_close) / prev_close * 100 if prev_close else 0
+                gain_60d = (latest_close - float(close.iloc[-min(60, len(close))])) / float(close.iloc[-min(60, len(close))]) * 100
+                amount = float(hist["amount"].iloc[-1]) if "amount" in hist.columns else 0
+                volume = float(hist["volume"].iloc[-1]) if "volume" in hist.columns else 0
+                return {
+                    "代码": code, "名称": name_map.get(code, code),
+                    "最新价": round(latest_close, 2),
+                    "涨跌幅": round(change_pct, 2),
+                    "60日涨跌幅": round(gain_60d, 2),
+                    "成交额": amount,
+                    "成交量": volume,
+                    # 无 PE/PB/流通市值——过滤阶段会跳过相关条件
+                }
+            except Exception:
+                return None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futs = [executor.submit(_one, c) for c in codes]
+            for fut in concurrent.futures.as_completed(futs):
+                r = fut.result()
+                if r:
+                    rows.append(r)
+
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
 
     def _fetch_hot_codes(self, md) -> dict[str, int]:
         """东方财富人气榜 Top 50，返回 {纯数字代码: 排名}。"""
