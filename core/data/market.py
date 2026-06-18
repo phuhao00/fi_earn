@@ -181,16 +181,21 @@ class MarketData:
         except Exception as e:
             logger.warning(f"东方财富接口失败，降级新浪: {symbol} {e}")
 
-        # 备用接口：新浪财经（不依赖 push2 CDN 节点）
+        # 备用接口：新浪财经（不依赖 push2 CDN，不支持日期参数，拉全量后裁切）
         try:
             df = self._ak.stock_zh_a_daily(
                 symbol=sina_code,
-                start_date=start_ymd,
-                end_date=end_ymd,
                 adjust=adjust if adjust in ("qfq", "hfq") else "",
             )
             df["date"] = pd.to_datetime(df["date"])
-            return df.set_index("date").sort_index()
+            df = df.set_index("date").sort_index()
+            # 按日期范围裁切
+            if start_date:
+                df = df[df.index >= pd.to_datetime(start_date)]
+            if end_date:
+                df = df[df.index <= pd.to_datetime(end_date)]
+            logger.debug(f"新浪财经成功: {symbol} {len(df)} 行")
+            return df
         except Exception as e2:
             logger.error(f"新浪财经接口也失败: {symbol} {e2}")
             return pd.DataFrame()

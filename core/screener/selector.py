@@ -288,8 +288,6 @@ class StockSelector:
         直接调用 ak.stock_zh_a_hist（不走 SWR 缓存），push2his CDN 收盘后可用。
         """
         ak = md._ak
-        end_date   = datetime.today().strftime("%Y-%m-%d")
-        start_date = (datetime.today() - timedelta(days=75)).strftime("%Y-%m-%d")
 
         # ── Step 1: 获取完整 A 股代码表 ──────────────────────────────────────
         name_map: dict[str, str] = {}
@@ -319,42 +317,36 @@ class StockSelector:
             sampled = list(CORE_UNIVERSE)
             logger.info(f"使用 CORE_UNIVERSE 保底: {len(sampled)} 支")
 
-        # ── Step 2: 并发拉历史，直接调 ak.stock_zh_a_hist 不走 SWR ───────────
+        # ── Step 2: 并发拉历史，用新浪财经 stock_zh_a_daily（不依赖东方财富 CDN）──
+        # stock_zh_a_daily 不接受日期参数，拉全量后取末尾 N 行
+
+        def _sina_sym(code: str) -> str:
+            return f"sh{code}" if code.startswith(("6", "9")) else f"sz{code}"
 
         def _one(code: str):
             try:
-                hist = ak.stock_zh_a_hist(
-                    symbol=code, period="daily",
-                    start_date=start_date, end_date=end_date,
+                hist = ak.stock_zh_a_daily(
+                    symbol=_sina_sym(code),
                     adjust="qfq",
                 )
                 if hist is None or hist.empty or len(hist) < 5:
                     return None
-                # AkShare 返回列：日期/开盘/最高/最低/收盘/成交量/成交额/振幅/涨跌幅/涨跌额/换手率
-                close_col  = next((c for c in hist.columns if "收盘" in c), None)
-                amount_col = next((c for c in hist.columns if "成交额" in c), None)
-                volume_col = next((c for c in hist.columns if "成交量" in c), None)
-                chg_col    = next((c for c in hist.columns if "涨跌幅" in c), None)
-                if close_col is None:
-                    return None
-                close = hist[close_col].apply(pd.to_numeric, errors="coerce").dropna()
+                # stock_zh_a_daily 列名已是英文: date,open,high,low,close,volume,amount,...
+                hist = hist.tail(75)   # 取最近 75 个交易日
+                close = pd.to_numeric(hist["close"], errors="coerce").dropna()
                 if len(close) < 5:
                     return None
                 latest_close = float(close.iloc[-1])
                 if latest_close <= 0:
                     return None
-                # 今日涨跌幅（直接从列取，避免重算）
-                if chg_col:
-                    change_pct = float(pd.to_numeric(hist[chg_col].iloc[-1], errors="coerce") or 0)
-                else:
-                    prev = float(close.iloc[-2]) if len(close) >= 2 else latest_close
-                    change_pct = (latest_close - prev) / prev * 100 if prev else 0
+                # 今日涨跌幅
+                prev = float(close.iloc[-2]) if len(close) >= 2 else latest_close
+                change_pct = (latest_close - prev) / prev * 100 if prev else 0
                 # 60 日涨幅
-                idx60 = -min(60, len(close))
-                base = float(close.iloc[idx60])
+                base = float(close.iloc[-min(60, len(close))])
                 gain_60d = (latest_close - base) / base * 100 if base else 0
-                amount = float(pd.to_numeric(hist[amount_col].iloc[-1], errors="coerce") or 0) if amount_col else 0
-                volume = float(pd.to_numeric(hist[volume_col].iloc[-1], errors="coerce") or 0) if volume_col else 0
+                amount = float(pd.to_numeric(hist["amount"].iloc[-1], errors="coerce") or 0) if "amount" in hist.columns else 0
+                volume = float(pd.to_numeric(hist["volume"].iloc[-1], errors="coerce") or 0) if "volume" in hist.columns else 0
                 return {
                     "代码": code,
                     "名称": name_map.get(code, code),
