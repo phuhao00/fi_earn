@@ -377,6 +377,36 @@ class MarketData:
     # 涨跌幅榜
     # ------------------------------------------------------------------ #
 
+    def get_spot_data(self) -> pd.DataFrame:
+        """获取全市场 A 股实时快照（原始 DataFrame），供涨跌榜和选股模块共享。
+        TTL 10 分钟，SWR 模式。
+        """
+        cache_key = "spot_data_raw"
+        fresh = cache.get(cache_key, ttl_hours=0.17)  # 10 分钟
+        if fresh is not None:
+            return fresh
+
+        stale = cache.get(cache_key, ttl_hours=9999, allow_stale=True)
+        if stale is not None:
+            self._bg_refresh(cache_key, self._fetch_spot_data)
+            return stale
+
+        df = self._fetch_spot_data()
+        if not df.empty:
+            cache.set(cache_key, df)
+        return df
+
+    def _fetch_spot_data(self) -> pd.DataFrame:
+        """真正拉取全市场快照，带备用接口降级。"""
+        try:
+            df = self._ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                logger.info(f"全市场快照获取成功: {len(df)} 支")
+                return df
+        except Exception as e:
+            logger.warning(f"stock_zh_a_spot_em 失败: {e}")
+        return pd.DataFrame()
+
     def get_market_movers(self, top_n: int = 10) -> dict[str, pd.DataFrame]:
         """获取涨幅榜和跌幅榜。stale-while-revalidate：有旧数据立刻返回，后台静默刷新。"""
         cache_key = f"movers:{top_n}"
@@ -397,11 +427,10 @@ class MarketData:
         return result
 
     def _fetch_market_movers(self, top_n: int) -> dict[str, pd.DataFrame]:
-        df = None
-        try:
-            df = self._ak.stock_zh_a_spot_em()
-        except Exception as e:
-            logger.warning(f"stock_zh_a_spot_em 不可用，尝试备用接口: {e}")
+        # 复用共享快照缓存，避免重复拉取
+        df = self.get_spot_data()
+        if df is None or df.empty:
+            df = None
 
         if df is None or df.empty:
             try:

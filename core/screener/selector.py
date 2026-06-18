@@ -90,27 +90,33 @@ class StockSelector:
     # 公开接口
     # ------------------------------------------------------------------ #
 
-    def select(self, force: bool = False) -> list[dict]:
+    def select(self, force: bool = False) -> dict:
         """
-        返回 Top 10 选股结果。
+        返回选股结果字典 {stocks: [...], error: str|None, from_cache: bool}。
 
-        force=True 时跳过缓存强制重算（「重新筛选」按钮使用）。
+        force=True 时跳过缓存强制重算。
         SWR 模式：有旧缓存时立刻返回，后台静默刷新。
         """
         if not force:
             fresh = cache.get(CACHE_KEY, ttl_hours=CACHE_TTL_HOURS)
             if fresh is not None:
-                return fresh
+                return {"stocks": fresh, "error": None, "from_cache": True}
 
             stale = cache.get(CACHE_KEY, ttl_hours=9999, allow_stale=True)
             if stale is not None:
                 self._bg_refresh()
-                return stale
+                return {"stocks": stale, "error": None, "from_cache": True, "stale": True}
 
-        result = self._run_pipeline()
+        try:
+            result = self._run_pipeline()
+        except Exception as e:
+            logger.error(f"选股流程异常: {e}", exc_info=True)
+            return {"stocks": [], "error": str(e), "from_cache": False}
+
         if result:
             cache.set(CACHE_KEY, result)
-        return result
+            return {"stocks": result, "error": None, "from_cache": False}
+        return {"stocks": [], "error": "筛选后无结果（市场可能已收盘或数据暂不可用）", "from_cache": False}
 
     # ------------------------------------------------------------------ #
     # 后台刷新
@@ -127,7 +133,9 @@ class StockSelector:
                 result = self._run_pipeline()
                 if result:
                     cache.set(CACHE_KEY, result)
-                    logger.info("选股后台刷新完成")
+                    logger.info(f"选股后台刷新完成: {len(result)} 支")
+                else:
+                    logger.warning("选股后台刷新：结果为空")
             except Exception as e:
                 logger.warning(f"选股后台刷新失败: {e}")
             finally:
@@ -143,13 +151,13 @@ class StockSelector:
     def _run_pipeline(self) -> list[dict]:
         md = get_market_data()
 
-        # Step 1: 全市场快照
+        # Step 1: 全市场快照 —— 复用 market 模块共享缓存
         logger.info("选股 Step 1: 拉取全市场快照...")
         spot_df = self._fetch_spot(md)
         if spot_df.empty:
             logger.error("全市场快照为空，选股终止")
             return []
-        logger.info(f"快照获取 {len(spot_df)} 支股票")
+        logger.info(f"快照获取 {len(spot_df)} 支股票，列名: {spot_df.columns.tolist()}")
 
         # 热度数据（新闻代理）
         hot_codes = self._fetch_hot_codes(md)
@@ -159,7 +167,7 @@ class StockSelector:
         logger.info("选股 Step 2: 宇宙过滤 + 初步评分...")
         scored = self._filter_and_score(spot_df, hot_codes)
         if scored.empty:
-            logger.warning("过滤后无候选股票")
+            logger.warning("过滤后无候选股票，请检查 API 列名或放宽过滤条件")
             return []
 
         candidates = scored.nlargest(CANDIDATES_N, "prelim_score")
@@ -176,14 +184,22 @@ class StockSelector:
     # ------------------------------------------------------------------ #
 
     def _fetch_spot(self, md) -> pd.DataFrame:
-        """从东方财富拉全市场实时快照，复用 market 模块缓存。"""
+        """复用 market 模块的共享快照缓存，避免重复拉取。"""
         try:
-            ak = md._ak
-            df = ak.stock_zh_a_spot_em()
-            return df
+            df = md.get_spot_data()
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:
+            logger.warning(f"md.get_spot_data() 失败，直接拉取: {e}")
+
+        # 降级：直接调用 AkShare
+        try:
+            df = md._ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                return df
         except Exception as e:
             logger.error(f"获取全市场快照失败: {e}")
-            return pd.DataFrame()
+        return pd.DataFrame()
 
     def _fetch_hot_codes(self, md) -> dict[str, int]:
         """东方财富人气榜 Top 50，返回 {纯数字代码: 排名}。"""
@@ -225,45 +241,69 @@ class StockSelector:
 
         df = df.copy()
         df["code"] = df["code"].astype(str).str.zfill(6)
+        total_before = len(df)
 
         # ── 宇宙过滤 ──────────────────────────────────────────────────────
+        # 注意：所有数值比较前必须 fillna 或用 .notna() 防止 NaN 误过滤
         mask = pd.Series([True] * len(df), index=df.index)
 
         # 排除 ST / 退市
         if "name" in df.columns:
+            before = mask.sum()
             mask &= ~df["name"].str.contains("ST|退", case=False, na=False)
+            logger.debug(f"  ST过滤: {before} → {mask.sum()}")
 
-        # 最低股价
+        # 最低股价（NaN 视为不合格，排除）
         if "price" in df.columns:
             df["price"] = pd.to_numeric(df["price"], errors="coerce")
-            mask &= df["price"] >= MIN_PRICE
+            before = mask.sum()
+            mask &= df["price"].fillna(0) >= MIN_PRICE
+            logger.debug(f"  价格过滤: {before} → {mask.sum()}")
 
-        # 流通市值
+        # 流通市值（NaN 表示数据缺失，排除；但如果 float_cap 列完全为 NaN 则跳过）
         if "float_cap" in df.columns:
             df["float_cap"] = pd.to_numeric(df["float_cap"], errors="coerce")
-            mask &= df["float_cap"] >= MIN_FLOAT_CAP
+            non_null_rate = df["float_cap"].notna().mean()
+            if non_null_rate > 0.1:   # 至少 10% 有值才启用此过滤
+                before = mask.sum()
+                mask &= df["float_cap"].fillna(0) >= MIN_FLOAT_CAP
+                logger.debug(f"  市值过滤: {before} → {mask.sum()} (非空率={non_null_rate:.1%})")
 
-        # 成交额
+        # 成交额（NaN 表示今日未交易，排除；但列近全空则跳过）
         if "amount" in df.columns:
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
-            mask &= df["amount"] >= MIN_AMOUNT
+            non_null_rate = df["amount"].notna().mean()
+            if non_null_rate > 0.1:
+                before = mask.sum()
+                mask &= df["amount"].fillna(0) >= MIN_AMOUNT
+                logger.debug(f"  成交额过滤: {before} → {mask.sum()} (非空率={non_null_rate:.1%})")
 
-        # 市盈率
+        # 市盈率（NaN 或 <= 0 排除；列近全空则跳过）
         if "pe" in df.columns:
             df["pe"] = pd.to_numeric(df["pe"], errors="coerce")
-            mask &= (df["pe"] > 0) & (df["pe"] <= MAX_PE)
+            non_null_rate = (df["pe"].notna() & (df["pe"] > 0)).mean()
+            if non_null_rate > 0.1:
+                before = mask.sum()
+                pe_ok = df["pe"].notna() & (df["pe"] > 0) & (df["pe"] <= MAX_PE)
+                mask &= pe_ok
+                logger.debug(f"  PE过滤: {before} → {mask.sum()} (有效PE率={non_null_rate:.1%})")
 
-        # 今日涨跌幅（避免追涨停）
+        # 今日涨跌幅（NaN 填 0 处理，避免误过滤）
         if "change_pct" in df.columns:
             df["change_pct"] = pd.to_numeric(df["change_pct"], errors="coerce")
-            mask &= df["change_pct"] <= MAX_TODAY_GAIN
+            before = mask.sum()
+            mask &= df["change_pct"].fillna(0) <= MAX_TODAY_GAIN
+            logger.debug(f"  涨停过滤: {before} → {mask.sum()}")
 
-        # 60 日涨幅（避免高位）
+        # 60 日涨幅（NaN 填 0，视为未涨）
         if "gain_60d" in df.columns:
             df["gain_60d"] = pd.to_numeric(df["gain_60d"], errors="coerce").fillna(0)
+            before = mask.sum()
             mask &= df["gain_60d"] <= MAX_GAIN_60D
+            logger.debug(f"  高位过滤: {before} → {mask.sum()}")
 
         df = df[mask].copy()
+        logger.info(f"宇宙过滤: {total_before} → {len(df)} 支通过")
         if df.empty:
             return df
 

@@ -156,7 +156,7 @@ function SkeletonCard() {
 // ─── 主页面 ─────────────────────────────────────────────────────────────────
 
 export default function ScreenerPage() {
-  const [result, setResult] = useState<{ updated_at: string; stocks: ScreenerStock[] } | null>(null);
+  const [result, setResult] = useState<import("@/lib/api").ScreenerResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -210,10 +210,19 @@ export default function ScreenerPage() {
 
       {/* 更新时间 + 说明 */}
       {result && !isLoading && (
-        <div className="flex items-center gap-4 text-xs text-slate-500">
+        <div className="flex flex-wrap items-center gap-4 text-xs text-slate-500">
           <span>上次更新：{result.updated_at.replace("T", " ")}</span>
-          <span>共筛出 {result.stocks.length} 只股票</span>
-          <span className="text-amber-500/70">· 重新筛选约需 15-30 秒（首次或缓存过期后）</span>
+          <span>共筛出 <span className="text-slate-300 font-medium">{result.stocks.length}</span> 只股票</span>
+          {result.stale && <span className="text-amber-500/70">· 数据来自缓存，正在后台刷新</span>}
+          {!result.stale && <span className="text-amber-500/70">· 重新筛选约需 15-30 秒（首次或缓存过期后）</span>}
+        </div>
+      )}
+
+      {/* 后端返回的错误消息 */}
+      {result && result.error && !isLoading && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-amber-400 text-sm">
+          <span className="font-medium">提示：</span>{result.error}
+          <span className="ml-2 text-amber-500/70">（市场收盘后数据可能不可用，请交易时段重试）</span>
         </div>
       )}
 

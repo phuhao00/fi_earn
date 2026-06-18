@@ -196,6 +196,9 @@ export interface ScreenerResult {
   updated_at: string;
   total: number;
   stocks: ScreenerStock[];
+  error?: string | null;
+  from_cache?: boolean;
+  stale?: boolean;
 }
 
 export const screenerApi = {
