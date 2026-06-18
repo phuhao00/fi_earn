@@ -1,0 +1,28 @@
+# 数据平台
+openbb>=4.6.0
+openbb-akshare>=1.2.5
+
+# A股数据源
+akshare>=1.18.0
+
+# 高性能回测引擎 (Rust+Python)
+akquant>=0.2.26
+
+# Web UI
+streamlit>=1.35.0
+
+# 交互式可视化
+plotly>=5.22.0
+
+# 数据处理
+pandas>=2.2.0
+polars>=0.20.0
+numpy>=1.26.0
+
+# 统计分析
+scipy>=1.13.0
+scikit-learn>=1.4.0
+
+# 工具
+python-dotenv>=1.0.0
+loguru>=0.7.0
