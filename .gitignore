@@ -35,3 +35,14 @@ env/
 
 # OpenBB 用户数据
 ~/OpenBBUserData/
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/node_modules/
+
+# 日志
+logs/
+
+# 环境变量（本地）
+frontend/.env.local

@@ -8,7 +8,11 @@ akshare>=1.18.0
 # 高性能回测引擎 (Rust+Python)
 akquant>=0.2.26
 
-# Web UI
+# FastAPI 后端
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# Streamlit Web UI（备选）
 streamlit>=1.35.0
 
 # 交互式可视化
