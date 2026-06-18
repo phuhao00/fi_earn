@@ -124,6 +124,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
 
 # 将项目根目录加入路径，使 core 包可被导入
 ROOT = Path(__file__).parent.parent
