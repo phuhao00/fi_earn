@@ -81,7 +81,15 @@ class MarketData:
         def _run():
             try:
                 result = fetch_fn()
-                is_empty = result is None or (hasattr(result, "empty") and result.empty) or result == {}
+                # 避免对 DataFrame 用 == {} 比较（pandas 会抛异常）
+                if result is None:
+                    is_empty = True
+                elif isinstance(result, pd.DataFrame):
+                    is_empty = result.empty
+                elif isinstance(result, dict):
+                    is_empty = not result
+                else:
+                    is_empty = False
                 if not is_empty:
                     cache.set(cache_key, result)
                     logger.info(f"后台刷新完成: {cache_key}")

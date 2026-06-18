@@ -83,7 +83,8 @@ class StockSelector:
     """全市场智能选股器。"""
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._bg_lock = threading.Lock()   # 防止 bg_refresh 并发
+        self._pipeline_lock = threading.Lock()  # 防止多个同步调用同时跑 pipeline
         self._refreshing = False
 
     # ------------------------------------------------------------------ #
@@ -107,23 +108,35 @@ class StockSelector:
                 self._bg_refresh()
                 return {"stocks": stale, "error": None, "from_cache": True, "stale": True}
 
-        try:
-            result = self._run_pipeline()
-        except Exception as e:
-            logger.error(f"选股流程异常: {e}", exc_info=True)
-            return {"stocks": [], "error": str(e), "from_cache": False}
+        # pipeline 执行锁：多个并发请求只允许一个真正跑，其他等待结果
+        with self._pipeline_lock:
+            # double-check: 可能刚才等锁时另一个线程已经跑完并写入缓存
+            if not force:
+                fresh = cache.get(CACHE_KEY, ttl_hours=CACHE_TTL_HOURS)
+                if fresh is not None:
+                    return {"stocks": fresh, "error": None, "from_cache": True}
+
+            try:
+                result = self._run_pipeline()
+            except Exception as e:
+                logger.error(f"选股流程异常: {e}", exc_info=True)
+                return {"stocks": [], "error": str(e), "from_cache": False}
 
         if result:
             cache.set(CACHE_KEY, result)
             return {"stocks": result, "error": None, "from_cache": False}
-        return {"stocks": [], "error": "筛选后无结果（市场可能已收盘或数据暂不可用）", "from_cache": False}
+        return {
+            "stocks": [],
+            "error": "暂无数据（市场收盘后实时快照不可用，将在下次开盘前自动刷新）",
+            "from_cache": False,
+        }
 
     # ------------------------------------------------------------------ #
     # 后台刷新
     # ------------------------------------------------------------------ #
 
     def _bg_refresh(self) -> None:
-        with self._lock:
+        with self._bg_lock:
             if self._refreshing:
                 return
             self._refreshing = True
@@ -139,7 +152,7 @@ class StockSelector:
             except Exception as e:
                 logger.warning(f"选股后台刷新失败: {e}")
             finally:
-                with self._lock:
+                with self._bg_lock:
                     self._refreshing = False
 
         threading.Thread(target=_run, daemon=True).start()
@@ -184,21 +197,35 @@ class StockSelector:
     # ------------------------------------------------------------------ #
 
     def _fetch_spot(self, md) -> pd.DataFrame:
-        """复用 market 模块的共享快照缓存，避免重复拉取。"""
+        """获取全市场快照。
+        优先新鲜数据（10min TTL）；收盘后实时接口会断连，自动降级到 48 小时内的旧缓存——
+        PE/PB/流通市值等基本面指标日内不变，用昨天数据选股完全可行。
+        """
+        # 1. 尝试新鲜缓存（复用 market 共享方法）
         try:
             df = md.get_spot_data()
             if df is not None and not df.empty:
                 return df
         except Exception as e:
-            logger.warning(f"md.get_spot_data() 失败，直接拉取: {e}")
+            logger.warning(f"md.get_spot_data() 失败: {e}")
 
-        # 降级：直接调用 AkShare
+        # 2. 降级直接拉（以防 market 模块也失败）
         try:
             df = md._ak.stock_zh_a_spot_em()
             if df is not None and not df.empty:
+                logger.info("直接拉取全市场快照成功")
+                cache.set("spot_data_raw", df)   # 写入共享缓存供下次用
                 return df
         except Exception as e:
-            logger.error(f"获取全市场快照失败: {e}")
+            logger.warning(f"直接拉取失败: {e}")
+
+        # 3. 收盘后兜底：使用 48h 内的旧快照（基本面数据日内不变）
+        stale = cache.get("spot_data_raw", ttl_hours=48, allow_stale=True)
+        if stale is not None and not stale.empty:
+            logger.info(f"实时接口不可用，使用 48h 内缓存快照（{len(stale)} 支）进行选股")
+            return stale
+
+        logger.error("全市场快照完全不可用（无任何缓存且实时接口失败）")
         return pd.DataFrame()
 
     def _fetch_hot_codes(self, md) -> dict[str, int]:
