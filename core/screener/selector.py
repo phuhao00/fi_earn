@@ -29,7 +29,10 @@ CACHE_TTL_HOURS = 0.5          # 30 分钟新鲜缓存
 CANDIDATES_N = 30              # 进入技术精排的候选数
 FINAL_N = 10                   # 最终输出数量
 HISTORY_DAYS = 65              # 拉取历史天数（确保 MA60 有数据）
-MAX_WORKERS = 16               # 并发拉取线程数
+MAX_WORKERS = 16               # 并发拉取线程数（基本操作）
+HIST_WORKERS = 32              # 历史兜底模式并发数
+HIST_SAMPLE = 500              # 历史兜底模式从全A股均匀采样支数
+HIST_TIMEOUT = 8               # 单支历史拉取超时秒数
 
 # 保底宇宙：精选 150 支沪深蓝筹（历史 CDN 必有数据，收盘后也能用）
 CORE_UNIVERSE = [
@@ -226,7 +229,7 @@ class StockSelector:
     # ------------------------------------------------------------------ #
 
     def _fetch_spot(self, md) -> pd.DataFrame:
-        """获取全市场快照，四级降级策略。
+        """获取全市场快照，五级降级策略。
         东方财富实时 CDN 收盘后（约 15:00）会断连；历史数据 CDN 全天可用。
         """
         # 1. 新鲜缓存（10min TTL）
@@ -246,6 +249,16 @@ class StockSelector:
                 return df
         except Exception as e:
             logger.warning(f"stock_zh_a_spot_em 失败: {e}")
+
+        # 2.5. Sina Finance 备用（不同 CDN，收盘后仍可用）
+        try:
+            df_sina = md._ak.stock_zh_a_spot()
+            if df_sina is not None and not df_sina.empty and len(df_sina) > 100:
+                cache.set("spot_data_raw", df_sina)
+                logger.info(f"Sina 备用快照成功: {len(df_sina)} 支")
+                return df_sina
+        except Exception as e:
+            logger.warning(f"stock_zh_a_spot (Sina) 失败: {e}")
 
         # 3. 48h 旧缓存（今天成功拉过的数据）
         stale = cache.get("spot_data_raw", ttl_hours=48, allow_stale=True)
@@ -271,89 +284,101 @@ class StockSelector:
 
     def _fetch_spot_from_hist(self, md) -> pd.DataFrame:
         """
-        用历史日线数据（stock_zh_a_hist）构建类似 spot 的快照。
-        历史 CDN（push2his.eastmoney.com）与实时 CDN 不同，收盘后照常可用。
-        使用 CSI 300 + CSI 500 成分股作为宇宙（~800 支质量股票）。
+        从全 A 股（~5000 支）均匀采样后，用历史日线数据构建快照。
+        直接调用 ak.stock_zh_a_hist（不走 SWR 缓存），push2his CDN 收盘后可用。
         """
         ak = md._ak
-
-        # 1. 获取指数成分股代码
-        codes: set[str] = set()
-        for sym in ["000300", "000905"]:
-            try:
-                df_comp = ak.index_stock_cons_weight_csindex(symbol=sym)
-                col = next((c for c in df_comp.columns if "代码" in c), None)
-                if col and not df_comp.empty:
-                    new = df_comp[col].astype(str).str.zfill(6).tolist()
-                    codes.update(new)
-                    logger.debug(f"成分股 {sym}: {len(new)} 支")
-            except Exception as e:
-                logger.warning(f"获取 {sym} 成分股失败: {e}")
-
-        # 若成分股获取失败，退化到 stock_info 列表前 500
-        if not codes:
-            try:
-                sl = md.get_stock_list()
-                if not sl.empty:
-                    raw = sl["code"].astype(str).str.zfill(6).tolist()
-                    codes = set(c for c in raw if c.startswith(("000", "001", "002", "003", "600", "601", "603", "605")))
-                    codes = set(list(codes)[:300])
-                    logger.info(f"退化到股票列表前 300 支")
-            except Exception as e:
-                logger.warning(f"获取股票列表失败，使用核心保底宇宙: {e}")
-
-        # 保底：使用精选蓝筹，确保历史 CDN 一定有数据
-        if not codes:
-            codes = set(CORE_UNIVERSE)
-            logger.info(f"使用核心保底宇宙 {len(codes)} 支")
-
-        logger.info(f"历史模式宇宙: {len(codes)} 支，开始并发拉取 65 日历史...")
-
-        # 2. 获取股票名称映射
-        name_map: dict[str, str] = {}
-        try:
-            sl = md.get_stock_list()
-            if not sl.empty:
-                name_map = dict(zip(sl["code"].astype(str).str.zfill(6), sl["name"]))
-        except Exception:
-            pass
-
-        # 3. 并发拉取历史
-        end_date = datetime.today().strftime("%Y-%m-%d")
+        end_date   = datetime.today().strftime("%Y-%m-%d")
         start_date = (datetime.today() - timedelta(days=75)).strftime("%Y-%m-%d")
-        rows = []
+
+        # ── Step 1: 获取完整 A 股代码表 ──────────────────────────────────────
+        name_map: dict[str, str] = {}
+        sampled: list[str] = []
+
+        try:
+            info_df = ak.stock_info_a_code_name()   # 轻量静态接口，不依赖实时 CDN
+            if info_df is not None and not info_df.empty:
+                code_col = info_df.columns[0]
+                name_col = info_df.columns[1] if len(info_df.columns) > 1 else code_col
+                all_codes = info_df[code_col].astype(str).str.zfill(6).tolist()
+                # 主板 + 中小板 + 创业板 + 科创板（排除 B 股 900xxx/200xxx）
+                main = [c for c in all_codes if c[:3] not in ("900", "200", "206")]
+                # 均匀采样 HIST_SAMPLE 支，确保全市场覆盖
+                step = max(1, len(main) // HIST_SAMPLE)
+                sampled = main[::step][:HIST_SAMPLE]
+                name_map = dict(zip(
+                    info_df[code_col].astype(str).str.zfill(6),
+                    info_df[name_col].astype(str)
+                ))
+                logger.info(f"stock_info_a_code_name: 全A股 {len(all_codes)} 支，采样 {len(sampled)} 支")
+        except Exception as e:
+            logger.warning(f"stock_info_a_code_name 失败: {e}")
+
+        # 保底：精选核心宇宙
+        if not sampled:
+            sampled = list(CORE_UNIVERSE)
+            logger.info(f"使用 CORE_UNIVERSE 保底: {len(sampled)} 支")
+
+        # ── Step 2: 并发拉历史，直接调 ak.stock_zh_a_hist 不走 SWR ───────────
 
         def _one(code: str):
             try:
-                hist = md.get_history(code, start_date, end_date, "qfq")
-                if hist.empty or "close" not in hist.columns or len(hist) < 5:
+                hist = ak.stock_zh_a_hist(
+                    symbol=code, period="daily",
+                    start_date=start_date, end_date=end_date,
+                    adjust="qfq",
+                )
+                if hist is None or hist.empty or len(hist) < 5:
                     return None
-                close = hist["close"]
+                # AkShare 返回列：日期/开盘/最高/最低/收盘/成交量/成交额/振幅/涨跌幅/涨跌额/换手率
+                close_col  = next((c for c in hist.columns if "收盘" in c), None)
+                amount_col = next((c for c in hist.columns if "成交额" in c), None)
+                volume_col = next((c for c in hist.columns if "成交量" in c), None)
+                chg_col    = next((c for c in hist.columns if "涨跌幅" in c), None)
+                if close_col is None:
+                    return None
+                close = hist[close_col].apply(pd.to_numeric, errors="coerce").dropna()
+                if len(close) < 5:
+                    return None
                 latest_close = float(close.iloc[-1])
-                prev_close = float(close.iloc[-2])
-                change_pct = (latest_close - prev_close) / prev_close * 100 if prev_close else 0
-                gain_60d = (latest_close - float(close.iloc[-min(60, len(close))])) / float(close.iloc[-min(60, len(close))]) * 100
-                amount = float(hist["amount"].iloc[-1]) if "amount" in hist.columns else 0
-                volume = float(hist["volume"].iloc[-1]) if "volume" in hist.columns else 0
+                if latest_close <= 0:
+                    return None
+                # 今日涨跌幅（直接从列取，避免重算）
+                if chg_col:
+                    change_pct = float(pd.to_numeric(hist[chg_col].iloc[-1], errors="coerce") or 0)
+                else:
+                    prev = float(close.iloc[-2]) if len(close) >= 2 else latest_close
+                    change_pct = (latest_close - prev) / prev * 100 if prev else 0
+                # 60 日涨幅
+                idx60 = -min(60, len(close))
+                base = float(close.iloc[idx60])
+                gain_60d = (latest_close - base) / base * 100 if base else 0
+                amount = float(pd.to_numeric(hist[amount_col].iloc[-1], errors="coerce") or 0) if amount_col else 0
+                volume = float(pd.to_numeric(hist[volume_col].iloc[-1], errors="coerce") or 0) if volume_col else 0
                 return {
-                    "代码": code, "名称": name_map.get(code, code),
+                    "代码": code,
+                    "名称": name_map.get(code, code),
                     "最新价": round(latest_close, 2),
                     "涨跌幅": round(change_pct, 2),
                     "60日涨跌幅": round(gain_60d, 2),
                     "成交额": amount,
                     "成交量": volume,
-                    # 无 PE/PB/流通市值——过滤阶段会跳过相关条件
                 }
             except Exception:
                 return None
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futs = [executor.submit(_one, c) for c in codes]
+        rows = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=HIST_WORKERS) as executor:
+            futs = {executor.submit(_one, c): c for c in sampled}
             for fut in concurrent.futures.as_completed(futs):
-                r = fut.result()
-                if r:
-                    rows.append(r)
+                try:
+                    r = fut.result(timeout=HIST_TIMEOUT)
+                    if r:
+                        rows.append(r)
+                except Exception:
+                    pass
 
+        logger.info(f"历史模式快照: {len(rows)} / {len(sampled)} 支成功")
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
     def _fetch_hot_codes(self, md) -> dict[str, int]:
