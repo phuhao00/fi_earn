@@ -29,7 +29,36 @@ CACHE_TTL_HOURS = 0.5          # 30 分钟新鲜缓存
 CANDIDATES_N = 30              # 进入技术精排的候选数
 FINAL_N = 10                   # 最终输出数量
 HISTORY_DAYS = 65              # 拉取历史天数（确保 MA60 有数据）
-MAX_WORKERS = 8                # 并发历史拉取线程数
+MAX_WORKERS = 16               # 并发拉取线程数
+
+# 保底宇宙：精选 150 支沪深蓝筹（历史 CDN 必有数据，收盘后也能用）
+CORE_UNIVERSE = [
+    # 金融
+    "600036","601288","601398","601939","601988","600016","000001","600000",
+    "601166","600015","601328","601601","601628","601318","000002","002142",
+    # 消费/白酒
+    "600519","000858","603288","000568","600809","000799","002304","600887",
+    "000895","603369","600559","002557",
+    # 科技/半导体
+    "002415","300750","000725","002230","688981","600745","002049","688599",
+    "603501","002475","300015","688041","603986","002555","688012",
+    # 医药
+    "600276","000661","300015","600196","002594","300760","688321","600085",
+    "000538","300347","603259","300122",
+    # 能源/电力
+    "600900","601985","600028","601857","600886","601088","600346","002081",
+    # 制造/新能源
+    "601012","300014","002594","600482","601899","601633","002714","600660",
+    "002236","601100","300274","300124",
+    # 交通/物流
+    "601111","600115","601872","600029","000039","601919","601808",
+    # 地产/建筑
+    "001979","600048","600383","601669","601186","000069",
+    # 传媒/互联网
+    "002415","300033","002304","000977",
+    # 钢铁/化工/有色
+    "600019","601600","000878","600547","600111","601666","002007",
+]
 
 # 过滤阈值
 MIN_FLOAT_CAP = 30e8           # 流通市值 30 亿
@@ -267,13 +296,16 @@ class StockSelector:
                 sl = md.get_stock_list()
                 if not sl.empty:
                     raw = sl["code"].astype(str).str.zfill(6).tolist()
-                    # 只取沪深主板（不含科创 688/创业板 300+）以减少噪音
                     codes = set(c for c in raw if c.startswith(("000", "001", "002", "003", "600", "601", "603", "605")))
-                    codes = set(list(codes)[:600])
-                    logger.info(f"退化到股票列表前 600 支")
+                    codes = set(list(codes)[:300])
+                    logger.info(f"退化到股票列表前 300 支")
             except Exception as e:
-                logger.error(f"获取股票列表也失败: {e}")
-                return pd.DataFrame()
+                logger.warning(f"获取股票列表失败，使用核心保底宇宙: {e}")
+
+        # 保底：使用精选蓝筹，确保历史 CDN 一定有数据
+        if not codes:
+            codes = set(CORE_UNIVERSE)
+            logger.info(f"使用核心保底宇宙 {len(codes)} 支")
 
         logger.info(f"历史模式宇宙: {len(codes)} 支，开始并发拉取 65 日历史...")
 
@@ -480,7 +512,7 @@ class StockSelector:
         return df
 
     # ------------------------------------------------------------------ #
-    # Step 3 技术精排
+    # Step 3 技术精排 + 基本面 + 新闻
     # ------------------------------------------------------------------ #
 
     def _technical_refinement(self, md, candidates: pd.DataFrame) -> list[dict]:
@@ -504,8 +536,8 @@ class StockSelector:
                 code, df = fut.result()
                 history_map[code] = df
 
-        # 计算技术指标并精排
-        results = []
+        # 计算技术指标并初步精排
+        pre_results = []
         for _, row in candidates.iterrows():
             code = row["code"]
             hist = history_map.get(code, pd.DataFrame())
@@ -520,8 +552,6 @@ class StockSelector:
                 ma5 = float(close.rolling(5).mean().iloc[-1]) if len(close) >= 5 else None
                 ma20 = float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else None
                 ma60 = float(close.rolling(60).mean().iloc[-1]) if len(close) >= 60 else None
-
-                # 均线多头排列
                 if ma5 and ma20 and ma60:
                     ma_aligned = ma5 > ma20 > ma60
                     if ma_aligned:
@@ -529,21 +559,55 @@ class StockSelector:
                     elif ma5 > ma20:
                         ma_bonus = 10.0
 
-            # RSI 调整分（健康区间 35-65 → 正分；> 70 → 扣分）
             if rsi14 <= 30:
                 rsi_bonus = 5.0
             elif rsi14 <= 65:
-                rsi_bonus = 15.0 * (rsi14 - 30) / 35        # 30→0, 65→15
+                rsi_bonus = 15.0 * (rsi14 - 30) / 35
             elif rsi14 <= 70:
-                rsi_bonus = 15.0 - (rsi14 - 65) * 3.0       # 65→15, 70→0
+                rsi_bonus = 15.0 - (rsi14 - 65) * 3.0
             else:
-                rsi_bonus = -(rsi14 - 70) * 2.0             # 70+ 线性扣分
+                rsi_bonus = -(rsi14 - 70) * 2.0
 
-            # 最终得分（初步评分 + 技术加成，归一化到 0-100）
-            tech_adj = (ma_bonus + rsi_bonus) / 35.0 * 20.0   # 技术加成最多 +20
+            tech_adj = (ma_bonus + rsi_bonus) / 35.0 * 20.0
             total_score = _clamp(row["prelim_score"] + tech_adj, 0.0, 100.0)
 
-            # 分项得分（展示用，四舍五入到1位）
+            pre_results.append({
+                "_row": row,
+                "code": code,
+                "rsi14": rsi14,
+                "ma_aligned": ma_aligned,
+                "total_score": total_score,
+            })
+
+        # 按技术评分取 Top N
+        pre_results.sort(key=lambda x: x["total_score"], reverse=True)
+        top_pre = pre_results[:FINAL_N]
+        top_codes = [r["code"] for r in top_pre]
+
+        # ── 并发拉基本面（个股详情）──────────────────────────────────────
+        fundamentals = self._fetch_individual_info(md, top_codes)
+
+        # ── 并发拉新闻 ───────────────────────────────────────────────────
+        news_map = self._fetch_news_match(md, top_codes)
+
+        # ── 汇总最终结果 ──────────────────────────────────────────────────
+        results = []
+        for item in top_pre:
+            row = item["_row"]
+            code = item["code"]
+            rsi14 = item["rsi14"]
+            ma_aligned = item["ma_aligned"]
+            total_score = item["total_score"]
+
+            fin = fundamentals.get(code, {})
+            news_info = news_map.get(code, {"score": 0, "headlines": []})
+
+            # 优先使用个股详情中的 PE/PB/市值（覆盖 spot 数据中的 0）
+            pe_val = fin.get("pe") or row.get("pe", 0) or 0
+            pb_val = fin.get("pb") or row.get("pb", 0) or 0
+            float_cap = fin.get("float_cap") or row.get("float_cap", 0) or 0
+            roe_val = fin.get("roe", 0) or 0
+
             scores = {
                 "trend": round(float(row["trend_score"]), 1),
                 "safety": round(float(row["safety_score"]), 1),
@@ -551,18 +615,20 @@ class StockSelector:
                 "hotness": round(float(row["hot_score"]), 1),
             }
 
-            # 关键指标
             metrics = {
-                "pe": round(float(row.get("pe", 0) or 0), 1),
-                "pb": round(float(row.get("pb", 0) or 0), 2),
-                "float_cap_yi": round(float(row.get("float_cap", 0) or 0) / 1e8, 1),
+                "pe": round(float(pe_val), 1),
+                "pb": round(float(pb_val), 2),
+                "roe": round(float(roe_val), 1),
+                "float_cap_yi": round(float(float_cap) / 1e8, 1),
+                "total_cap_yi": round(float(fin.get("total_cap", 0) or 0) / 1e8, 1),
                 "rsi14": round(rsi14, 1),
                 "ma_aligned": ma_aligned,
                 "gain_60d": round(float(row.get("gain_60d", 0) or 0), 2),
                 "amount_yi": round(float(row.get("amount", 0) or 0) / 1e8, 2),
+                "news_score": news_info["score"],
             }
 
-            reason = _build_reason(scores, metrics, ma_aligned, rsi14)
+            reason = _build_reason(scores, metrics, ma_aligned, rsi14, news_info)
 
             results.append({
                 "code": code,
@@ -572,22 +638,121 @@ class StockSelector:
                 "total_score": round(total_score, 1),
                 "scores": scores,
                 "metrics": metrics,
+                "news": news_info["headlines"],
                 "reason": reason,
             })
 
-        # 按最终得分降序取 Top N
         results.sort(key=lambda x: x["total_score"], reverse=True)
-        top = results[:FINAL_N]
-        for i, item in enumerate(top):
+        for i, item in enumerate(results):
             item["rank"] = i + 1
-        return top
+        return results
+
+    # ------------------------------------------------------------------ #
+    # 个股基本面详情
+    # ------------------------------------------------------------------ #
+
+    def _fetch_individual_info(self, md, codes: list[str]) -> dict[str, dict]:
+        """并发调用 stock_individual_info_em，提取 PE/PB/ROE/市值等。"""
+        result: dict[str, dict] = {}
+
+        def _one(code: str):
+            try:
+                df = md._ak.stock_individual_info_em(symbol=code)
+                if df is None or df.empty:
+                    return code, {}
+                d: dict = {}
+                for _, r in df.iterrows():
+                    item = str(r.get("item", "")).strip()
+                    val  = r.get("value", "")
+                    try:
+                        fval = float(str(val).replace(",", "").replace("%", ""))
+                    except (ValueError, TypeError):
+                        fval = 0.0
+                    if "市盈率" in item:
+                        d["pe"] = fval
+                    elif "市净率" in item:
+                        d["pb"] = fval
+                    elif "ROE" in item or "净资产收益率" in item:
+                        d["roe"] = fval
+                    elif "流通市值" in item:
+                        d["float_cap"] = fval
+                    elif "总市值" in item:
+                        d["total_cap"] = fval
+                    elif "每股收益" in item:
+                        d["eps"] = fval
+                    elif "营业总收入" in item or "营收" in item:
+                        d["revenue"] = fval
+                return code, d
+            except Exception as e:
+                logger.debug(f"个股详情失败 {code}: {e}")
+                return code, {}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futs = {executor.submit(_one, c): c for c in codes}
+            for fut in concurrent.futures.as_completed(futs):
+                code, info = fut.result()
+                result[code] = info
+        logger.info(f"个股基本面: {sum(1 for v in result.values() if v)} / {len(codes)} 支成功")
+        return result
+
+    # ------------------------------------------------------------------ #
+    # 新闻匹配度
+    # ------------------------------------------------------------------ #
+
+    def _fetch_news_match(self, md, codes: list[str]) -> dict[str, dict]:
+        """并发拉最新新闻，做关键词情绪评分，返回分数和标题列表。"""
+        POS_KW = ["利好", "突破", "创新高", "业绩增长", "超预期", "扩张", "战略合作",
+                  "获批", "中标", "涨价", "提价", "回购", "增持", "主力", "政策支持"]
+        NEG_KW = ["利空", "亏损", "下滑", "违规", "调查", "退市", "减持", "处罚",
+                  "业绩下降", "风险", "诉讼", "负面"]
+        result: dict[str, dict] = {}
+
+        def _one(code: str):
+            try:
+                df = md._ak.stock_news_em(symbol=code)
+                if df is None or df.empty:
+                    return code, {"score": 0, "headlines": []}
+                title_col = next((c for c in df.columns if "标题" in c or "title" in c.lower()), None)
+                date_col  = next((c for c in df.columns if "时间" in c or "日期" in c or "date" in c.lower()), None)
+                if title_col is None:
+                    return code, {"score": 0, "headlines": []}
+                recent = df.head(10)
+                titles = recent[title_col].dropna().tolist()
+                dates  = recent[date_col].tolist() if date_col else [""] * len(titles)
+                score = 0
+                for t in titles:
+                    for kw in POS_KW:
+                        if kw in str(t):
+                            score += 8
+                    for kw in NEG_KW:
+                        if kw in str(t):
+                            score -= 10
+                score = max(-100, min(100, score))
+                headlines = [
+                    {"title": str(t)[:60], "date": str(d)}
+                    for t, d in zip(titles[:5], dates[:5])
+                ]
+                return code, {"score": score, "headlines": headlines}
+            except Exception as e:
+                logger.debug(f"新闻拉取失败 {code}: {e}")
+                return code, {"score": 0, "headlines": []}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futs = {executor.submit(_one, c): c for c in codes}
+            for fut in concurrent.futures.as_completed(futs):
+                code, news_data = fut.result()
+                result[code] = news_data
+        news_ok = sum(1 for v in result.values() if v["headlines"])
+        logger.info(f"新闻拉取: {news_ok} / {len(codes)} 支有新闻")
+        return result
 
 
 # --------------------------------------------------------------------------- #
 # 理由生成
 # --------------------------------------------------------------------------- #
 
-def _build_reason(scores: dict, metrics: dict, ma_aligned: bool, rsi14: float) -> str:
+def _build_reason(scores: dict, metrics: dict, ma_aligned: bool, rsi14: float,
+                  news_info: dict | None = None) -> str:
     parts = []
 
     if ma_aligned:
@@ -606,6 +771,12 @@ def _build_reason(scores: dict, metrics: dict, ma_aligned: bool, rsi14: float) -
     elif pe > 35:
         parts.append(f"PE {pe} 偏高")
 
+    roe = metrics.get("roe", 0)
+    if roe and roe >= 15:
+        parts.append(f"ROE {roe:.1f}% 盈利能力强")
+    elif roe and roe >= 8:
+        parts.append(f"ROE {roe:.1f}%")
+
     gain_60d = metrics.get("gain_60d", 0)
     if gain_60d < 20:
         parts.append("近60日未过度拉升")
@@ -614,6 +785,11 @@ def _build_reason(scores: dict, metrics: dict, ma_aligned: bool, rsi14: float) -
 
     if scores.get("hotness", 0) >= 50:
         parts.append("市场关注度高")
+
+    if news_info and news_info.get("score", 0) > 0:
+        parts.append("近期新闻偏正面")
+    elif news_info and news_info.get("score", 0) < -20:
+        parts.append("近期新闻需关注负面风险")
 
     if not parts:
         parts.append("综合指标均衡")

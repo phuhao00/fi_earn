@@ -173,11 +173,19 @@ export interface StockScores {
 export interface StockMetrics {
   pe: number;
   pb: number;
+  roe: number;
   float_cap_yi: number;
+  total_cap_yi: number;
   rsi14: number;
   ma_aligned: boolean;
   gain_60d: number;
   amount_yi: number;
+  news_score: number;
+}
+
+export interface NewsHeadline {
+  title: string;
+  date: string;
 }
 
 export interface ScreenerStock {
@@ -189,6 +197,7 @@ export interface ScreenerStock {
   total_score: number;
   scores: StockScores;
   metrics: StockMetrics;
+  news: NewsHeadline[];
   reason: string;
 }
 

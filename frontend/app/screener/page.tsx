@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState, useCallback } from "react";
-import { screenerApi, type ScreenerStock } from "@/lib/api";
+import { screenerApi, type ScreenerStock, type NewsHeadline } from "@/lib/api";
 import { colorClass, fmtPct } from "@/lib/utils";
 
 // ─── 评分进度条 ────────────────────────────────────────────────────────────
@@ -33,14 +33,46 @@ function DimTag({ label, value }: { label: string; value: number }) {
   );
 }
 
+// ─── 新闻情绪指示 ───────────────────────────────────────────────────────────
+
+function NewsScore({ score }: { score: number }) {
+  if (score > 20)
+    return <span className="text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded">利好 +{score}</span>;
+  if (score < -20)
+    return <span className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 px-2 py-0.5 rounded">利空 {score}</span>;
+  return <span className="text-xs text-slate-400 bg-slate-500/10 border border-slate-500/20 px-2 py-0.5 rounded">中性</span>;
+}
+
+// ─── 新闻列表 ───────────────────────────────────────────────────────────────
+
+function NewsList({ headlines }: { headlines: NewsHeadline[] }) {
+  if (!headlines || headlines.length === 0)
+    return <p className="text-xs text-slate-600 italic">暂无新闻数据</p>;
+  return (
+    <ul className="space-y-1.5">
+      {headlines.map((h, i) => (
+        <li key={i} className="flex items-start gap-2">
+          <span className="mt-1 w-1 h-1 rounded-full bg-slate-500 flex-shrink-0" />
+          <div className="min-w-0">
+            <p className="text-xs text-slate-300 leading-snug line-clamp-2">{h.title}</p>
+            {h.date && <p className="text-[10px] text-slate-600 mt-0.5">{h.date.slice(0, 16)}</p>}
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 // ─── 股票卡片 ───────────────────────────────────────────────────────────────
 
 function StockCard({ stock }: { stock: ScreenerStock }) {
+  const [expanded, setExpanded] = useState(false);
   const chgColor = stock.change_pct > 0 ? "text-red-400" : stock.change_pct < 0 ? "text-green-400" : "text-slate-400";
   const scoreColor =
     stock.total_score >= 75 ? "text-emerald-400"
     : stock.total_score >= 55 ? "text-blue-400"
     : "text-amber-400";
+  const m = stock.metrics;
 
   return (
     <div className="bg-[#1a1d24] border border-[#2d3140] rounded-xl p-4 hover:border-blue-500/40 transition-colors">
@@ -63,7 +95,6 @@ function StockCard({ stock }: { stock: ScreenerStock }) {
             </div>
           </div>
         </div>
-        {/* 综合评分 */}
         <div className="text-right">
           <div className={`text-2xl font-bold ${scoreColor}`}>{stock.total_score}</div>
           <div className="text-xs text-slate-500">综合评分</div>
@@ -81,50 +112,86 @@ function StockCard({ stock }: { stock: ScreenerStock }) {
         <DimTag label="安全" value={stock.scores.safety} />
         <DimTag label="基本面" value={stock.scores.fundamental} />
         <DimTag label="热度" value={stock.scores.hotness} />
+        <NewsScore score={m.news_score} />
       </div>
 
       {/* 关键指标 */}
-      <div className="grid grid-cols-4 gap-2 mb-3 text-center">
-        <div>
-          <div className="text-xs text-slate-500">PE</div>
-          <div className="text-xs font-mono text-slate-300">{stock.metrics.pe}</div>
-        </div>
-        <div>
-          <div className="text-xs text-slate-500">PB</div>
-          <div className="text-xs font-mono text-slate-300">{stock.metrics.pb}</div>
-        </div>
-        <div>
-          <div className="text-xs text-slate-500">RSI14</div>
-          <div className={`text-xs font-mono ${stock.metrics.rsi14 > 70 ? "text-amber-400" : "text-slate-300"}`}>
-            {stock.metrics.rsi14}
+      <div className="grid grid-cols-5 gap-1.5 mb-3 text-center">
+        <div className="bg-[#252a35] rounded-lg py-1.5">
+          <div className="text-[10px] text-slate-500">PE</div>
+          <div className={`text-xs font-mono ${m.pe > 0 && m.pe <= 35 ? "text-slate-200" : m.pe > 35 ? "text-amber-400" : "text-slate-500"}`}>
+            {m.pe > 0 ? m.pe : "—"}
           </div>
         </div>
-        <div>
-          <div className="text-xs text-slate-500">60日涨</div>
-          <div className={`text-xs font-mono ${colorClass(stock.metrics.gain_60d)}`}>
-            {stock.metrics.gain_60d > 0 ? "+" : ""}{stock.metrics.gain_60d}%
+        <div className="bg-[#252a35] rounded-lg py-1.5">
+          <div className="text-[10px] text-slate-500">PB</div>
+          <div className="text-xs font-mono text-slate-200">{m.pb > 0 ? m.pb : "—"}</div>
+        </div>
+        <div className="bg-[#252a35] rounded-lg py-1.5">
+          <div className="text-[10px] text-slate-500">ROE%</div>
+          <div className={`text-xs font-mono ${m.roe >= 15 ? "text-emerald-400" : m.roe >= 8 ? "text-blue-400" : "text-slate-400"}`}>
+            {m.roe > 0 ? m.roe.toFixed(1) : "—"}
+          </div>
+        </div>
+        <div className="bg-[#252a35] rounded-lg py-1.5">
+          <div className="text-[10px] text-slate-500">RSI14</div>
+          <div className={`text-xs font-mono ${m.rsi14 > 70 ? "text-amber-400" : m.rsi14 < 35 ? "text-blue-400" : "text-slate-200"}`}>
+            {m.rsi14}
+          </div>
+        </div>
+        <div className="bg-[#252a35] rounded-lg py-1.5">
+          <div className="text-[10px] text-slate-500">60日涨</div>
+          <div className={`text-xs font-mono ${colorClass(m.gain_60d)}`}>
+            {m.gain_60d > 0 ? "+" : ""}{m.gain_60d}%
           </div>
         </div>
       </div>
 
-      {/* 均线多头 + 流通市值 */}
-      <div className="flex items-center justify-between mb-3">
-        <span className={`text-xs px-2 py-0.5 rounded border ${
-          stock.metrics.ma_aligned
+      {/* 次要指标行 */}
+      <div className="flex items-center justify-between mb-3 text-xs text-slate-500">
+        <span className={`px-2 py-0.5 rounded border ${
+          m.ma_aligned
             ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/30"
             : "text-slate-500 bg-slate-500/10 border-slate-500/20"
         }`}>
-          {stock.metrics.ma_aligned ? "均线多头排列" : "均线未排列"}
+          {m.ma_aligned ? "均线多头排列" : "均线未排列"}
         </span>
-        <span className="text-xs text-slate-500">
-          流通市值 <span className="text-slate-400">{stock.metrics.float_cap_yi} 亿</span>
-        </span>
+        <div className="flex gap-3">
+          {m.float_cap_yi > 0 && (
+            <span>流通市值 <span className="text-slate-400">{m.float_cap_yi} 亿</span></span>
+          )}
+          {m.amount_yi > 0 && (
+            <span>成交额 <span className="text-slate-400">{m.amount_yi} 亿</span></span>
+          )}
+        </div>
       </div>
 
       {/* 理由 */}
-      <p className="text-xs text-slate-400 bg-[#252a35] rounded-lg px-3 py-2 leading-relaxed">
+      <p className="text-xs text-slate-400 bg-[#252a35] rounded-lg px-3 py-2 leading-relaxed mb-2">
         {stock.reason}
       </p>
+
+      {/* 新闻折叠区 */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center justify-between text-xs text-slate-500 hover:text-slate-300 transition-colors py-1"
+      >
+        <span className="flex items-center gap-1.5">
+          <span>📰</span>
+          <span>近期新闻</span>
+          {stock.news.length > 0 && (
+            <span className="bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded-full text-[10px]">
+              {stock.news.length}
+            </span>
+          )}
+        </span>
+        <span className={`transition-transform ${expanded ? "rotate-180" : ""}`}>▾</span>
+      </button>
+      {expanded && (
+        <div className="mt-2 pt-2 border-t border-[#2d3140]">
+          <NewsList headlines={stock.news} />
+        </div>
+      )}
     </div>
   );
 }
@@ -143,12 +210,12 @@ function SkeletonCard() {
       </div>
       <div className="h-1.5 w-full bg-[#2d3140] rounded mb-3" />
       <div className="flex gap-1.5 mb-3">
-        {[1, 2, 3, 4].map((i) => <div key={i} className="h-5 w-16 bg-[#2d3140] rounded" />)}
+        {[1, 2, 3, 4, 5].map((i) => <div key={i} className="h-5 w-14 bg-[#2d3140] rounded" />)}
       </div>
-      <div className="grid grid-cols-4 gap-2 mb-3">
-        {[1, 2, 3, 4].map((i) => <div key={i} className="h-8 bg-[#2d3140] rounded" />)}
+      <div className="grid grid-cols-5 gap-1.5 mb-3">
+        {[1, 2, 3, 4, 5].map((i) => <div key={i} className="h-10 bg-[#2d3140] rounded" />)}
       </div>
-      <div className="h-10 w-full bg-[#2d3140] rounded" />
+      <div className="h-8 w-full bg-[#2d3140] rounded" />
     </div>
   );
 }
@@ -187,7 +254,7 @@ export default function ScreenerPage() {
         <div>
           <h1 className="text-2xl font-bold text-white">智能选股</h1>
           <p className="text-sm text-slate-400 mt-1">
-            多因子模型 · 趋势 + 安全位 + 基本面 + 市场热度 · 自动排除垃圾股和高位股
+            多因子模型 · 趋势 + 安全位 + 基本面 + 市场热度 + 新闻情绪 · 自动排除垃圾股和高位股
           </p>
         </div>
         <button
@@ -219,7 +286,7 @@ export default function ScreenerPage() {
       )}
 
       {/* 后端返回的错误消息 */}
-      {result && result.error && !isLoading && (
+      {result?.error && !isLoading && (
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 text-amber-400 text-sm">
           <span className="font-medium">提示：</span>{result.error}
           <span className="ml-2 text-amber-500/70">（市场收盘后数据可能不可用，请交易时段重试）</span>
@@ -227,12 +294,13 @@ export default function ScreenerPage() {
       )}
 
       {/* 评分说明 */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         {[
           { label: "趋势分 30%", desc: "均线多头排列 + 近期涨幅适中" },
           { label: "安全位 25%", desc: "RSI 健康区间 + 非高位" },
-          { label: "基本面 25%", desc: "PE/PB 估值合理 + 盈利" },
+          { label: "基本面 25%", desc: "PE/PB/ROE 估值 + 盈利能力" },
           { label: "热度分 20%", desc: "东财人气榜热点代理" },
+          { label: "新闻情绪", desc: "关键词匹配正负面新闻" },
         ].map((item) => (
           <div key={item.label} className="bg-[#1a1d24] border border-[#2d3140] rounded-lg px-3 py-2">
             <div className="text-xs font-medium text-blue-400">{item.label}</div>
